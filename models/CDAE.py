@@ -26,24 +26,31 @@ class CDAE():
         # AdaGrad Parameters
         ada_beta = kwargs.get('ada_beta') if kwargs.get('ada_beta') else 1.0
         ada_learning_rate = kwargs.get('ada_learning_rate') if kwargs.get('ada_learning_rate') else 0.01
-        #optimizer = tf.train.AdagradOptimizer(ada_learning_rate, ada_beta)
-        optimizer = tf.train.GradientDescentOptimizer(ada_learning_rate)
+        optimizer = tf.train.AdagradOptimizer(ada_learning_rate, ada_beta)
+        #optimizer = tf.train.GradientDescentOptimizer(ada_learning_rate)
 
         # Regularization Parameter
         reg_lambda = kwargs.get('reg_lambda') if kwargs.get('reg_lambda') else 1.0
 
         # Model Ops
+        self.prime_indices = tf.placeholder(tf.int32, [None])
+        self.W_indices = tf.placeholder(tf.int32, [None])
+        self.W_prime_coords = tf.placeholder(tf.int32, [None, None])
+        self.b_prime_coords = tf.placeholder(tf.int32, [None, None])
+        self.W_coords = tf.placeholder(tf.int32, [None, None])
+        self.V_coords = tf.placeholder(tf.int32, [None, None])
+
         self.y = tf.placeholder(tf.float32, [None, self.n_items])
-        self.z = lambda u: transfer_fn(tf.add_n( [tf.matmul(self.y, self.weight['W']), 
-                                                  tf.reshape(self.weight['V'][u], [1, n_hidden]), 
+        self.z = transfer_fn(tf.add_n( [tf.matmul(self.y, self.weight['W']), 
+                                                  tf.reshape(self.weight['V_u'], [1, n_hidden]), 
                                                   tf.reshape(self.weight['b'], [1, n_hidden])]
                                                 ))
-        self.y_hat = lambda u: output_fn(tf.add(tf.matmul(self.z(u), tf.transpose(self.weight['W_prime'])),
-                                                tf.reshape(self.weight['b_prime'], [1, self.n_items]))
-                                        )   
+        self.y_hat = output_fn(tf.add(tf.matmul(self.z, tf.transpose(self.weight['W_prime'])),
+                                                   self.weight['b_prime'])
+                              )   
         # Loss Function
         # TODO - Figure out how to include logistic loss efficiently
-        self.loss = lambda u: tf.nn.l2_loss(tf.sub(self.y, self.y_hat(u)))
+        self.loss = tf.nn.l2_loss(tf.sub(self.y, self.y_hat))
 
         # Gradient Ops
         #   - To my knowledge this when cost_gradient_apply gets called per user per item
@@ -52,11 +59,37 @@ class CDAE():
         #     to simulate something like batch training.
         #   - TODO compare results of both online and batch methods
         
-        self.dLoss_d = lambda u, var: optimizer.compute_gradients(self.loss(u), var_list=[var])[0][0]
-        self.dCost_d = lambda u, var: tf.mul(1.0 / self.n_users, self.dLoss_d(u, var)) - tf.mul(reg_lambda, var)
-        self.cost_gradient_apply = lambda u, var: optimizer.apply_gradients([[self.dCost_d(u, var), var]])
+        dloss_dweights = optimizer.compute_gradients(self.loss, var_list=[self.weight['W_prime'],
+                                                                          self.weight['b_prime'],
+                                                                          self.weight['W'],
+                                                                          self.weight['V'],
+                                                                          self.weight['b']])
+        # Add l2 Regularization Penalty
+        W_prime_grads = tf.gather(dloss_dweights[0][0], self.prime_indices) + reg_lambda * tf.gather(self.weight['W_prime'], self.prime_indices)
+        b_prime_grads = tf.gather(tf.transpose(dloss_dweights[1][0]), self.prime_indices) + reg_lambda * tf.gather(tf.transpose(self.weight['b_prime']), self.prime_indices)
+        W_grads = tf.gather(dloss_dweights[2][0], self.W_indices) + reg_lambda * tf.gather(self.weight['W'], self.W_indices)
+        V_grads = tf.gather(dloss_dweights[3][0], self.user_index) + reg_lambda * tf.gather(self.weight['V'], self.user_index)
+        b_grads = dloss_dweights[4][0] + reg_lambda * self.weight['b']
+
+        W_prime_grads = self._make_dense_grad(W_prime_grads, [self.n_items, n_hidden], self.W_prime_coords)
+        b_prime_grads = self._make_dense_grad(b_prime_grads, [1, self.n_items], self.b_prime_coords)
+        W_grads = self._make_dense_grad(W_grads, [self.n_items, n_hidden], self.W_coords)
+        V_grads = self._make_dense_grad(V_grads, [self.n_users, n_hidden], self.V_coords)
+
+        
+ 
+        self._train = optimizer.apply_gradients([ [W_prime_grads, self.weight['W_prime']],
+                                                  [b_prime_grads, self.weight['b_prime']],
+                                                  [W_grads, self.weight['W']],
+                                                  [b_grads, self.weight['b']],
+                                                  [V_grads, self.weight['V']] ])
+
         self.init_op = tf.initialize_all_variables()
         print 'Done.'
+
+    def _make_dense_grad(self, grad, shape, coords):
+        values = tf.reshape(grad, [-1])
+        return tf.sparse_to_dense(sparse_indices=coords, output_shape=shape, sparse_values=values)
  
     def _create_augmented_O_set(self, ith_data, neg_sample_ratio = 5):
         '''
@@ -70,7 +103,7 @@ class CDAE():
         else:
             for index in np.random.permutation(neg_examples_indices)[0:neg_sample_ratio * len(pos_examples_indices)]:
                 aug_set.add(index)
-        return aug_set
+        return sorted(list(aug_set))
 
     def train(self, **kwargs):
         '''
@@ -82,7 +115,7 @@ class CDAE():
         dropout_prob = tf.constant(dropout_prob, dtype=tf.float32)
         iteration = 0
 
-        self.weight = self._init_variables(n_hidden) 
+        self.weight = self._create_variables(n_hidden) 
         self._set_up_training_ops(**kwargs)
 
         old_avg_cost = None
@@ -97,7 +130,7 @@ class CDAE():
             old_avg_cost = avg_cost if iteration >= 1 else None 
             sum_cost = 0
             for u in xrange(self.n_users):
-                val_data = input_data[u].get_full_data()
+                val_data = [input_data[u].get_full_data()]
                 train_data = input_data[u].get_train_data()
                 
                 if self.sparse:
@@ -108,16 +141,37 @@ class CDAE():
                         print 'user: {}'.format(u)
                 y_tilde = sess.run(tf.nn.dropout(tf.constant(train_data, dtype=tf.float32, shape=[1, self.n_items]), dropout_prob))
                 augmented_O_set = self._create_augmented_O_set(np.array(val_data))
+                observed_O_set = sorted(list(np.where(y_tilde > 0)[1])) 
+                
+                print 'y_tilde: {}'.format(y_tilde)
+                print ''
+                print 'user_index: {}'.format(u)
+                print ''
+                print 'prime_indices: {}'.format(augmented_O_set)
+                print ''
+                print 'W_indices: {}'.format(observed_O_set)
+                print ''
+                print 'W_prime_coords: {}'.format([ [i, j] for i in augmented_O_set for j in xrange(n_hidden)])
+                print ''
+                print 'b_prime_coords: {}'.format([ [0, i] for i in augmented_O_set])
+                print ''
+                print 'W_coords: {}'.format([ [i, j] for i in observed_O_set for j in xrange(n_hidden)])
+                print ''
+                print 'V_coords: {}'.format([ [u, i] for i in xrange(n_hidden)])
 
-                for item in augmented_O_set:
-                    sess.run(self.cost_gradient_apply(u, self.weight['W_prime'][item]), feed_dict={self.y: y_tilde})
-                    sess.run(self.cost_gradient_apply(u, self.weight['b_prime'][item]), feed_dict={self.y: y_tilde})
-                for item in np.where(x_tilde == 1):
-                    sess.run(self.cost_gradient_apply(u, self.weight['W'][item]), feed_dict={self.y: y_tilde})
+                feed_dict = {self.y: y_tilde,
+                             self.user_index: u,
+                             self.prime_indices: augmented_O_set,
+                             self.W_indices: observed_O_set, 
+                             self.W_prime_coords: [ [i, j] for i in augmented_O_set for j in xrange(n_hidden)],
+                             self.b_prime_coords: [ [0, i] for i in augmented_O_set],
+                             self.W_coords: [ [i, j] for i in observed_O_set for j in xrange(n_hidden)],
+                             self.V_coords: [ [u, i] for i in xrange(n_hidden)] }
 
-                sess.run(self.cost_gradient_apply(u, self.weight['V'][u]), feed_dict={self.y: y_tilde})
-                sess.run(self.cost_gradient_apply(u, self.weight['b']), feed_dict={self.y: y_tilde})
-                sum_cost += sess.run(self.loss(u), feed_dict={self.y: val_data})
+                sess.run(self._train, feed_dict=feed_dict)
+
+                sum_cost += sess.run(self.loss, feed_dict={self.y: val_data,
+                                                            self.user_index: u})
             
             avg_cost = sum_cost / self.n_users
             model_improved = True if old_avg_cost == None or old_avg_cost > avg_cost else False
@@ -252,7 +306,7 @@ class CDAE():
         return (sum([self.average_precision(u, user, N) for u, user in enumerate(self.input_data.get_data())]) / 
                float(len(self.users))) 
 
-    def _init_variables(self, n_hidden=50):
+    def _create_variables(self, n_hidden=50):
         '''
 
             Initialize Tensorflow Variables
@@ -263,13 +317,13 @@ class CDAE():
         '''
         # TODO-Look into slicing Big Variables and see if they are updatable.. Check performance        
         print 'Creating Tensorflow Variables...'
-        W = utils.xavier_init(self.n_items, n_hidden)
-        W_prime = utils.xavier_init(self.n_items, n_hidden)
+        self.user_index = tf.placeholder(tf.int32, shape=[])
         all_weights = dict()
-        all_weights['W'] = [tf.Variable(W[i]) for i in xrange(self.n_items)]
-        all_weights['W_prime'] = [tf.Variable(W_prime[i]) for i in xrange(self.n_items)]
+        all_weights['W'] = tf.Variable(utils.xavier_init(self.n_items, n_hidden))
+        all_weights['W_prime'] = tf.Variable(utils.xavier_init(self.n_items, n_hidden)) 
         all_weights['b'] = tf.Variable(tf.zeros([1, n_hidden], dtype=tf.float32))   
-        all_weights['b_prime'] = [tf.Variable(tf.constant(0, dtype=tf.float32), dtype=tf.float32) for _ in xrange(self.n_items)]
-        all_weights['V'] = [tf.Variable(tf.zeros([n_hidden])) for _ in xrange(self.n_users)] 
+        all_weights['b_prime'] = tf.Variable(tf.zeros([1, self.n_items], dtype=tf.float32)) 
+        all_weights['V'] = tf.Variable(tf.zeros([self.n_users, n_hidden], dtype=tf.float32))  
+        all_weights['V_u'] = tf.nn.embedding_lookup(all_weights['V'], self.user_index)
         print 'Done.'
         return all_weights
