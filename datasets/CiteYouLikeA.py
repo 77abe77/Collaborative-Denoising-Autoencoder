@@ -22,7 +22,7 @@ class CiteYouLikeA(AbstractInputSource):
             for user in input_file:
                 user = user.strip()
                 user = user.split()[1:]
-                full_items = np.array([int(item) for item in user[1:]])
+                full_items = np.array([int(item) for item in user])
                 train_indices, test_indices = self.rand_split_data(full_items)
                 train_data = self._make_sparse_from_raw_set(train_indices)
                 test_data = test_indices
@@ -35,11 +35,11 @@ class CiteYouLikeA(AbstractInputSource):
              for user in input_file:
                 user = user.strip()
                 user = user.split()[1:]
-                full_items = np.array([int(item) for item in user[1:]])
-                train_indices, test_indices = self.rand_split_data(full_items)
-                train_data = [1.0 if item in train_indices else 0.0 for item in xrange(self.n_items)]
-                test_data = test_indices
-                full_data = [1.0 if item in full_items else 0.0 for item in xrange(self.n_items)]
+                full_items = np.array([int(item) for item in user])
+                train_items, test_items = self.rand_split_data(full_items)
+                train_data = np.array([1.0 if item in train_items else 0.0 for item in xrange(self.n_items)])
+                test_data = test_items
+                full_data = np.array([1.0 if item in full_items else 0.0 for item in xrange(self.n_items)])
                  
                 self.data.append(self.Data(train_data, test_data, full_data))
 

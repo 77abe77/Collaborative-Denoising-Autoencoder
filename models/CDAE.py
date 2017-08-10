@@ -27,7 +27,6 @@ class CDAE():
         ada_beta = kwargs.get('ada_beta') if kwargs.get('ada_beta') else 1.0
         ada_learning_rate = kwargs.get('ada_learning_rate') if kwargs.get('ada_learning_rate') else 0.01
         optimizer = tf.train.AdagradOptimizer(ada_learning_rate, ada_beta)
-        #optimizer = tf.train.GradientDescentOptimizer(ada_learning_rate)
 
         # Regularization Parameter
         reg_lambda = kwargs.get('reg_lambda') if kwargs.get('reg_lambda') else 1.0
@@ -140,24 +139,32 @@ class CDAE():
                     except:
                         print 'user: {}'.format(u)
                 y_tilde = sess.run(tf.nn.dropout(tf.constant(train_data, dtype=tf.float32, shape=[1, self.n_items]), dropout_prob))
-                augmented_O_set = self._create_augmented_O_set(np.array(val_data))
-                observed_O_set = sorted(list(np.where(y_tilde > 0)[1])) 
-                
-                print 'y_tilde: {}'.format(y_tilde)
-                print ''
+                augmented_O_set = self._create_augmented_O_set(val_data[0])
+                observed_O_set = sorted(list(np.where(y_tilde > 0)[1])) if len(np.where(y_tilde > 0)) == 2 else []
+                if len(observed_O_set) == 0:
+                    observed_O_set = sorted(list(np.where(train_data > 0)[0]))
+                #print 'augmented_O_set: {}'.format(augmented_O_set)
+                #print ''
+                if len(observed_O_set) == 0:
+                    print 'observed_O_set: {}'.format(observed_O_set)
+                    print sorted(list(np.where(train_data > 0)[0]))
+
+                #print ''
+                #print 'y_tilde: {}'.format(y_tilde)
+                #print ''
                 print 'user_index: {}'.format(u)
                 print ''
-                print 'prime_indices: {}'.format(augmented_O_set)
-                print ''
-                print 'W_indices: {}'.format(observed_O_set)
-                print ''
-                print 'W_prime_coords: {}'.format([ [i, j] for i in augmented_O_set for j in xrange(n_hidden)])
-                print ''
-                print 'b_prime_coords: {}'.format([ [0, i] for i in augmented_O_set])
-                print ''
-                print 'W_coords: {}'.format([ [i, j] for i in observed_O_set for j in xrange(n_hidden)])
-                print ''
-                print 'V_coords: {}'.format([ [u, i] for i in xrange(n_hidden)])
+                #print 'prime_indices: {}'.format(augmented_O_set)
+                #print ''
+                #print 'W_indices: {}'.format(observed_O_set)
+                #print ''
+                #print 'W_prime_coords: {}'.format([ [i, j] for i in augmented_O_set for j in xrange(n_hidden)])
+                #print ''
+                #print 'b_prime_coords: {}'.format([ [0, i] for i in augmented_O_set])
+                #print ''
+                #print 'W_coords: {}'.format([ [i, j] for i in observed_O_set for j in xrange(n_hidden)])
+                #print ''
+                #print 'V_coords: {}'.format([ [u, i] for i in xrange(n_hidden)])
 
                 feed_dict = {self.y: y_tilde,
                              self.user_index: u,
@@ -175,7 +182,7 @@ class CDAE():
             
             avg_cost = sum_cost / self.n_users
             model_improved = True if old_avg_cost == None or old_avg_cost > avg_cost else False
-            print 'Iteration: {}                    Average Cost per User: {}'.format(i, cost)
+            print 'Iteration: {}                    Average Cost per User: {}'.format(iteration, avg_cost)
             iteration += 1
         sess.close()
    
